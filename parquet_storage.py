@@ -7,18 +7,19 @@ import time
 from data_loader import load_and_validate_data
 from sqlite_storage import get_ticker_data, DB_NAME
 
-PARQUET_FILE = 'market_data.parquet'
+PARQUET_DIR = 'market_data'  # Partitioned directory
 TICKERS_FILE = 'tickers.csv'
 PRICES_FILE = 'market_data_multi.csv'
 
 #########
 
-def init_parquet(parquet_path, csv_path, tickers_path):
+def init_parquet(parquet_dir, csv_path, tickers_path):
     """
-    Initialize Parquet file from CSV data.
+    Initialize partitioned Parquet dataset from CSV data.
+    Creates partitioned directory structure by ticker symbol.
     """
-    if os.path.exists(parquet_path):
-        print(f"Parquet file {parquet_path} already exists.")
+    if os.path.exists(parquet_dir) and os.path.isdir(parquet_dir):
+        print(f"Parquet directory {parquet_dir} already exists.")
         return
     
     try:
@@ -32,19 +33,29 @@ def init_parquet(parquet_path, csv_path, tickers_path):
     
     clean_df = clean_df.sort_values(['ticker', 'timestamp'])
     
+    # Convert to PyArrow table
     table = pa.Table.from_pandas(clean_df)
-    pq.write_table(table, parquet_path)
-    print(f"Successfully created Parquet file: {parquet_path}")
+    
+    # Write partitioned dataset by ticker symbol
+    pq.write_to_dataset(
+        table,
+        root_path=parquet_dir,
+        partition_cols=['ticker']
+    )
+    print(f"Successfully created partitioned Parquet dataset: {parquet_dir}/")
     print(f"Loaded {len(clean_df)} price records into Parquet.")
+    print(f"Partitioned by ticker: {sorted(clean_df['ticker'].unique())}")
 
 def load_parquet(parquet_path):
     """
-    Load Parquet file into pandas DataFrame.
+    Load Parquet data from partitioned directory into pandas DataFrame.
     """
-    if not os.path.exists(parquet_path):
-        raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
+    if not os.path.isdir(parquet_path):
+        raise FileNotFoundError(f"Parquet directory not found: {parquet_path}")
     
-    table = pq.read_table(parquet_path)
+    # Read from partitioned directory
+    dataset = pq.ParquetDataset(parquet_path)
+    table = dataset.read()
     df = table.to_pandas()
     
     if 'timestamp' in df.columns:
@@ -52,22 +63,54 @@ def load_parquet(parquet_path):
     
     return df
 
+def get_parquet_size(parquet_path):
+    """
+    Calculate total size of partitioned Parquet directory.
+    """
+    if not os.path.isdir(parquet_path):
+        return 0
+    
+    # Calculate directory size
+    total_size = 0
+    for dirpath, dirnames, filenames in os.walk(parquet_path):
+        for filename in filenames:
+            filepath = os.path.join(dirpath, filename)
+            total_size += os.path.getsize(filepath)
+    return total_size
+
 
 ######################################### Data Querying Functions #########################################
 
 def get_ticker_data_parquet(parquet_path, ticker, start_date, end_date):
     """
     Retrieve all data for a ticker between start_date and end_date.
+    Optimized to read only the relevant partition.
     """
-    df = load_parquet(parquet_path)
+    # Optimized: read only the specific ticker partition
+    ticker_partition = os.path.join(parquet_path, f'ticker={ticker}')
+    if os.path.exists(ticker_partition) and os.path.isdir(ticker_partition):
+        # Read from partition subdirectory
+        dataset = pq.ParquetDataset(ticker_partition)
+        table = dataset.read()
+        df = table.to_pandas()
+        # Add ticker column since it's in the partition path, not the data
+        if 'ticker' not in df.columns:
+            df['ticker'] = ticker
+    else:
+        # Fallback to full dataset if partition doesn't exist
+        df = load_parquet(parquet_path)
     
+    # Filter by date range
     mask = (
-        (df['ticker'] == ticker) &
         (df['timestamp'] >= start_date) &
         (df['timestamp'] <= end_date)
     )
     result = df[mask].copy()
     result = result.sort_values('timestamp')
+    
+    # Ensure timestamp is datetime
+    if 'timestamp' in result.columns:
+        result['timestamp'] = pd.to_datetime(result['timestamp'])
     
     return result[['ticker', 'timestamp', 'open', 'high', 'low', 'close', 'volume']]
 
@@ -160,28 +203,46 @@ def get_all_market_data_parquet(parquet_path, ticker, start_date, end_date):
 ######################################### Parquet-Specific Tasks #########################################
 
 def task1_aapl_rolling_average(parquet_path, window=5):
-    df = load_parquet(parquet_path)
+    """
+    Load all data for AAPL and compute 5-minute rolling average of close price.
+    Optimized to read only AAPL partition.
+    """
+    # Read only AAPL partition for efficiency
+    aapl_partition = os.path.join(parquet_path, 'ticker=AAPL')
+    if os.path.exists(aapl_partition) and os.path.isdir(aapl_partition):
+        dataset = pq.ParquetDataset(aapl_partition)
+        table = dataset.read()
+        df = table.to_pandas()
+        # Add ticker column since it's in the partition path
+        if 'ticker' not in df.columns:
+            df['ticker'] = 'AAPL'
+    else:
+        df = load_parquet(parquet_path)
+        df = df[df['ticker'] == 'AAPL'].copy()
     
-    aapl = df[df['ticker'] == 'AAPL'].copy()
-    aapl = aapl.sort_values('timestamp')
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values('timestamp')
+    df['close_5min_ma'] = df['close'].rolling(window=window, min_periods=1).mean()
     
-    aapl['close_5min_ma'] = aapl['close'].rolling(window=window, min_periods=1).mean()
-    
-    return aapl[['ticker', 'timestamp', 'close', 'close_5min_ma']]
+    return df[['ticker', 'timestamp', 'close', 'close_5min_ma']]
 
 def task2_rolling_volatility(parquet_path, window=5):
-
+    """
+    Compute 5-day rolling volatility (std dev) of returns for each ticker.
+    """
     df = load_parquet(parquet_path)
     df = df.sort_values(['ticker', 'timestamp'])
     
     df['returns'] = df.groupby('ticker')['close'].pct_change()
-    
     df['volatility_5d'] = df.groupby('ticker')['returns'].rolling(window=window, min_periods=1).std().reset_index(0, drop=True)
     
     return df[['ticker', 'timestamp', 'close', 'returns', 'volatility_5d']]
 
 def task3_benchmark_comparison(parquet_path, ticker='TSLA', start_date='2025-11-17', end_date='2025-11-18'):
-    
+    """
+    Compare query time and file size with SQLite3 for Task 1.
+    """
     results = {}
     
     # SQLite3 query
@@ -203,32 +264,46 @@ def task3_benchmark_comparison(parquet_path, ticker='TSLA', start_date='2025-11-
     results['parquet'] = {
         'query_time': parquet_time,
         'records': len(parquet_df),
-        'file_size': os.path.getsize(parquet_path) if os.path.exists(parquet_path) else 0
+        'file_size': get_parquet_size(parquet_path)
     }
     
     # Comparison
+    if parquet_time > 0:
+        time_ratio = sqlite_time / parquet_time
+        speedup = f"{time_ratio:.2f}x faster" if parquet_time < sqlite_time else f"{parquet_time / sqlite_time:.2f}x slower"
+    else:
+        time_ratio = float('inf')
+        speedup = "N/A"
+    
+    if results['parquet']['file_size'] > 0:
+        size_ratio = results['sqlite']['file_size'] / results['parquet']['file_size']
+        size_diff = ((results['sqlite']['file_size'] - results['parquet']['file_size']) / results['parquet']['file_size'] * 100)
+        size_difference = f"{size_diff:.1f}%"
+    else:
+        size_ratio = 0
+        size_difference = "N/A"
+    
     results['comparison'] = {
-        'time_ratio': sqlite_time / parquet_time,
-        'size_ratio': results['sqlite']['file_size'] / results['parquet']['file_size'],
-        'speedup': f"{sqlite_time / parquet_time:.2f}x faster" if parquet_time < sqlite_time else f"{parquet_time / sqlite_time:.2f}x slower",
-        'size_difference': f"{((results['sqlite']['file_size'] - results['parquet']['file_size']) / results['parquet']['file_size'] * 100):.1f}%"
+        'time_ratio': time_ratio,
+        'size_ratio': size_ratio,
+        'speedup': speedup,
+        'size_difference': size_difference
     }
     
     return results
 
-
-########################## Main Execution Flow ##########################
-
 def main():
-    if not os.path.exists(PARQUET_FILE):
-        print("Initializing Parquet file...")
-        init_parquet(PARQUET_FILE, PRICES_FILE, TICKERS_FILE)
+    parquet_path = PARQUET_DIR
+    
+    if not os.path.exists(parquet_path):
+        print("Initializing partitioned Parquet dataset...")
+        init_parquet(parquet_path, PRICES_FILE, TICKERS_FILE)
     
     print("\n" + "="*60)
     print("Parquet Queries")
     print("="*60)
     
-    dfs = get_all_market_data_parquet(PARQUET_FILE, 'AAPL', '2025-11-17', '2025-11-22')
+    dfs = get_all_market_data_parquet(parquet_path, 'AAPL', '2025-11-17', '2025-11-22')
     for key in dfs:
         print(f"\n--- {key} ---")
         print(dfs[key].head())
@@ -237,14 +312,14 @@ def main():
     print("\n" + "="*60)
     print("Parquet Task 1: AAPL 5-minute rolling avg.")
     print("="*60)
-    task1_result = task1_aapl_rolling_average(PARQUET_FILE)
+    task1_result = task1_aapl_rolling_average(parquet_path)
     print(task1_result.head(10))
     print(f"\nTotal records: {len(task1_result)}")
     
     print("\n" + "="*60)
     print("Parquet Task 2: 5-day rolling vol")
     print("="*60)
-    task2_result = task2_rolling_volatility(PARQUET_FILE)
+    task2_result = task2_rolling_volatility(parquet_path)
     print(task2_result.head(10))
     print(f"\nTotal records: {len(task2_result)}")
     print(f"Tickers: {task2_result['ticker'].nunique()}")
@@ -252,7 +327,7 @@ def main():
     print("\n" + "="*60)
     print("Parquet Task 3: Benchmark comparison")
     print("="*60)
-    benchmark_results = task3_benchmark_comparison(PARQUET_FILE)
+    benchmark_results = task3_benchmark_comparison(parquet_path)
     
     print("\nSQLite Results:")
     print(f"  Query time: {benchmark_results['sqlite']['query_time']:.4f} seconds")
