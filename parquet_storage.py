@@ -7,11 +7,9 @@ import time
 from data_loader import load_and_validate_data
 from sqlite_storage import get_ticker_data, DB_NAME
 
-PARQUET_DIR = 'market_data'  # Partitioned directory
+PARQUET_DIR = 'market_data'
 TICKERS_FILE = 'tickers.csv'
 PRICES_FILE = 'market_data_multi.csv'
-
-#########
 
 def init_parquet(parquet_dir, csv_path, tickers_path):
     """
@@ -33,10 +31,8 @@ def init_parquet(parquet_dir, csv_path, tickers_path):
     
     clean_df = clean_df.sort_values(['ticker', 'timestamp'])
     
-    # Convert to PyArrow table
     table = pa.Table.from_pandas(clean_df)
     
-    # Write partitioned dataset by ticker symbol
     pq.write_to_dataset(
         table,
         root_path=parquet_dir,
@@ -52,8 +48,6 @@ def load_parquet(parquet_path):
     """
     if not os.path.isdir(parquet_path):
         raise FileNotFoundError(f"Parquet directory not found: {parquet_path}")
-    
-    # Read from partitioned directory
     dataset = pq.ParquetDataset(parquet_path)
     table = dataset.read()
     df = table.to_pandas()
@@ -70,7 +64,6 @@ def get_parquet_size(parquet_path):
     if not os.path.isdir(parquet_path):
         return 0
     
-    # Calculate directory size
     total_size = 0
     for dirpath, dirnames, filenames in os.walk(parquet_path):
         for filename in filenames:
@@ -86,21 +79,16 @@ def get_ticker_data_parquet(parquet_path, ticker, start_date, end_date):
     Retrieve all data for a ticker between start_date and end_date.
     Optimized to read only the relevant partition.
     """
-    # Optimized: read only the specific ticker partition
     ticker_partition = os.path.join(parquet_path, f'ticker={ticker}')
     if os.path.exists(ticker_partition) and os.path.isdir(ticker_partition):
-        # Read from partition subdirectory
         dataset = pq.ParquetDataset(ticker_partition)
         table = dataset.read()
         df = table.to_pandas()
-        # Add ticker column since it's in the partition path, not the data
         if 'ticker' not in df.columns:
             df['ticker'] = ticker
     else:
-        # Fallback to full dataset if partition doesn't exist
         df = load_parquet(parquet_path)
     
-    # Filter by date range
     mask = (
         (df['timestamp'] >= start_date) &
         (df['timestamp'] <= end_date)
@@ -108,7 +96,6 @@ def get_ticker_data_parquet(parquet_path, ticker, start_date, end_date):
     result = df[mask].copy()
     result = result.sort_values('timestamp')
     
-    # Ensure timestamp is datetime
     if 'timestamp' in result.columns:
         result['timestamp'] = pd.to_datetime(result['timestamp'])
     
@@ -207,13 +194,11 @@ def task1_aapl_rolling_average(parquet_path, window=5):
     Load all data for AAPL and compute 5-minute rolling average of close price.
     Optimized to read only AAPL partition.
     """
-    # Read only AAPL partition for efficiency
     aapl_partition = os.path.join(parquet_path, 'ticker=AAPL')
     if os.path.exists(aapl_partition) and os.path.isdir(aapl_partition):
         dataset = pq.ParquetDataset(aapl_partition)
         table = dataset.read()
         df = table.to_pandas()
-        # Add ticker column since it's in the partition path
         if 'ticker' not in df.columns:
             df['ticker'] = 'AAPL'
     else:
