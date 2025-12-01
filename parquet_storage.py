@@ -107,7 +107,7 @@ def get_avg_daily_volume_parquet(parquet_path):
     """
     df = load_parquet(parquet_path)
     
-    result = df.groupby('ticker')['volume'].mean().reset_index()
+    result = df.groupby('ticker', observed=True)['volume'].mean().reset_index()
     result.columns = ['symbol', 'avg_daily_volume']
     result['avg_daily_volume'] = result['avg_daily_volume'].astype(int)
     result = result.sort_values('avg_daily_volume', ascending=False)
@@ -155,7 +155,7 @@ def get_daily_trade_summary_parquet(parquet_path, limit=None):
     df['trade_date'] = df['timestamp'].dt.date
     
     results = []
-    for (ticker, trade_date), group in df.groupby(['ticker', 'trade_date']):
+    for (ticker, trade_date), group in df.groupby(['ticker', 'trade_date'], observed=True):
         group_sorted = group.sort_values('timestamp')
         first_price = group_sorted.iloc[0]['open']
         last_price = group_sorted.iloc[-1]['close']
@@ -219,8 +219,8 @@ def task2_rolling_volatility(parquet_path, window=5):
     df = load_parquet(parquet_path)
     df = df.sort_values(['ticker', 'timestamp'])
     
-    df['returns'] = df.groupby('ticker')['close'].pct_change()
-    df['volatility_5d'] = df.groupby('ticker')['returns'].rolling(window=window, min_periods=1).std().reset_index(0, drop=True)
+    df['returns'] = df.groupby('ticker', observed=True)['close'].pct_change()
+    df['volatility_5d'] = df.groupby('ticker', observed=True)['returns'].rolling(window=window, min_periods=1).std().reset_index(0, drop=True)
     
     return df[['ticker', 'timestamp', 'close', 'returns', 'volatility_5d']]
 

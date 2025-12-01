@@ -11,6 +11,8 @@ PRICES_FILE = 'market_data_multi.csv'
 
 def init_db(connection):
     cursor = connection.cursor()
+    # Enable foreign key constraints
+    cursor.execute("PRAGMA foreign_keys = ON")
     schema_sql = """
     CREATE TABLE IF NOT EXISTS tickers (
         ticker_id INTEGER PRIMARY KEY,
